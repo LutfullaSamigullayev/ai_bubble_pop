@@ -1,161 +1,119 @@
-
 # AI Bubble Pop Game
 
-Real-time webcam-based interactive game powered by **MediaPipe Hand Landmarker**, OpenCV and Python.
+Webkamera orqali ikkita qo'lni kuzatadigan va bosh barmoq bilan ko'rsatkich barmoqni qisish (pinch) orqali havo sharlarini yoradigan interaktiv o'yin.
 
-Players use their hands and fingers to pop bubbles falling from the top of the screen. The system supports simultaneous hand detection, allowing multiple players to participate at the same time.
+## Asosiy imkoniyatlar
 
-## Features
+- MediaPipe `0.10.21` Legacy Hands API.
+- `model_complexity=0` — CPU uchun yengil model.
+- Bir vaqtning o'zida maksimal 2 ta qo'l.
+- Har bir qo'l uchun 21 ta landmark.
+- Shar faqat yangi pinch harakati shar tanasi ichida sodir bo'lsa yoriladi.
+- Hajmli gradient, yorug'lik aks etishi, tugun va ipga ega sharlar.
+- Kamera va AI alohida worker threadda ishlaydi.
+- Pygame o'yin sikli 60 FPS maqsadida ishlaydi.
+- Full-screen rejim.
 
-- Real-time hand detection using webcam.
-- Multi-hand tracking (up to 6 hands).
-- 21 hand landmarks detection.
-- Finger tip tracking.
-- CPU-based inference.
-- Real-time FPS monitoring.
-- Interactive bubble popping game (coming soon).
-
-## Tech Stack
-
-- Python 3.12
-- MediaPipe
-- OpenCV
-- NumPy
-- Pygame (planned)
-
-## Project Structure
-
-```text
-ai-bubble-pop/
-│
-├── models/
-│   ├── .gitkeep
-│   └── hand_landmarker.task
-│
-├── src/
-│   └── __init__.py
-│
-├── assets/
-│
-├── main.py
-├── requirements.txt
-├── .gitignore
-└── README.md
-```
-
-## Requirements
+## Talablar
 
 - Python 3.12
-- Webcam
-- Windows / Linux
-- Minimum 8 GB RAM recommended
-- NVIDIA GPU is not required
+- Windows 10/11 (Linux va macOS ham mos bo'lishi mumkin)
+- Webkamera
+- Tavsiya etilgan RAM: 8 GB yoki undan yuqori
+- NVIDIA GPU talab qilinmaydi
 
-## Installation
-
-### 1. Clone repository
-
-```bash
-git clone <YOUR_REPOSITORY_URL>
-cd ai-bubble-pop
-```
-
-### 2. Create virtual environment
+## O'rnatish
 
 ```bash
 python -m venv .venv
 ```
 
-### 3. Activate virtual environment
-
-For Git Bash:
+Git Bash:
 
 ```bash
 source .venv/Scripts/activate
 ```
 
-For PowerShell:
+PowerShell:
 
 ```powershell
 .venv\Scripts\Activate.ps1
 ```
 
-### 4. Install dependencies
+Kutubxonalarni o'rnatish:
 
 ```bash
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 5. Download MediaPipe model
+> Muhim: bu versiya MediaPipe `0.10.21` bilan tekshirilgan `mp.solutions.hands` API'sidan foydalanadi. `mp.tasks` API'si ishlatilmaydi.
 
-Create the models directory if it does not exist:
-
-```bash
-mkdir -p models
-```
-
-Download the pretrained Hand Landmarker model:
+## Avval kamerani alohida tekshirish
 
 ```bash
-curl -L "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task" -o models/hand_landmarker.task
+python hand_test_lite.py
 ```
 
-The model will be saved inside the `models/` directory.
+`Q` tugmasi bilan testdan chiqing.
 
-## Run the Project
-
-Start the application:
+## O'yinni ishga tushirish
 
 ```bash
 python main.py
 ```
 
-The webcam will open automatically.
+- Bosh va ko'rsatkich barmoq uchini bir-biriga qisib sharni yoriting.
+- Oddiy tegish sharni yormaydi.
+- Har bir yorilgan shar 10 ball beradi.
+- `ESC` yoki `Q` tugmasi o'yindan chiqaradi.
 
-Show your hands to the camera to test hand detection and tracking.
+## Sozlamalar
 
-Press `Q` to exit.
+`src/hand_tracker.py` faylida:
 
-## Hand Detection
+```python
+MAX_HANDS = 2
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 480
+MODEL_COMPLEXITY = 0
+MIN_DETECTION_CONFIDENCE = 0.45
+MIN_TRACKING_CONFIDENCE = 0.45
+```
 
-MediaPipe Hand Landmarker detects 21 landmarks for each detected hand.
+Pinch sezgirligi shu fayldagi `PinchTracker` klassida:
 
-Important landmarks:
+```python
+PINCH_START_RATIO = 0.30
+PINCH_RELEASE_RATIO = 0.46
+```
 
-| Index | Finger |
-|---|---|
-| 4 | Thumb |
-| 8 | Index Finger |
-| 12 | Middle Finger |
-| 16 | Ring Finger |
-| 20 | Pinky |
+- `PINCH_START_RATIO` kattaroq bo'lsa, qisish osonroq aniqlanadi, lekin noto'g'ri trigger ehtimoli ortadi.
+- `PINCH_RELEASE_RATIO` start qiymatidan kattaroq bo'lishi kerak. Bu jitter'ni kamaytiruvchi hysteresis beradi.
 
-The application is configured to detect up to 6 hands simultaneously.
+## FPS haqida
 
-## Development Roadmap
+- `O'YIN FPS` — Pygame animatsiya tezligi.
+- `AI FPS` — kamera kadrlarini MediaPipe qayta ishlash tezligi.
 
-- [x] Initial project setup
-- [x] MediaPipe integration
-- [x] Webcam integration
-- [x] Multi-hand detection
-- [x] Hand landmark visualization
-- [ ] Finger tracking improvements
-- [ ] Bubble animation
-- [ ] Collision detection
-- [ ] Bubble popping effects
-- [ ] Sound effects
-- [ ] Score system
-- [ ] Multiple player support
-- [ ] Game levels and difficulty
+Thread ishlatish AI hisoblashini tezlashtirmaydi, ammo inference o'yin animatsiyasini bloklamasligiga yordam beradi. AI FPS protsessor, kamera va yorug'lik sharoitiga bog'liq.
 
-## Notes
+## Loyiha tuzilishi
 
-- Detection performance depends on lighting, camera quality and CPU performance.
-- Keep your hands visible to the webcam.
-- The application does not identify individual players yet.
-- The pretrained model is downloaded separately and is not stored in Git.
+```text
+ai-bubble-pop/
+├── assets/
+│   └── .gitkeep
+├── models/
+│   └── .gitkeep
+├── src/
+│   ├── __init__.py
+│   └── hand_tracker.py
+├── hand_test_lite.py
+├── main.py
+├── requirements.txt
+├── .gitignore
+└── README.md
+```
 
-## License
-
-This project is developed for educational and experimental purposes.
+MediaPipe `0.10.21` Legacy Hands API model og'irliklarini paketning o'zidan yuklaydi. `models/hand_landmarker.task` fayli bu versiyada kerak emas.

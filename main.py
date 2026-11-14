@@ -1,362 +1,408 @@
+"""AI Bubble Pop Game using MediaPipe 0.10.21 lightweight Hands API."""
+from __future__ import annotations
+
 import math
 import random
-import time
 from pathlib import Path
 
 import cv2
-import mediapipe as mp
 import pygame
 
+from src.hand_tracker import HandTrackingWorker, PinchTracker, MAX_HANDS
 
-# -----------------------------------------------------------------------------
-# Configuration
-# -----------------------------------------------------------------------------
-MODEL_PATH = Path(__file__).resolve().parent / "models" / "hand_landmarker.task"
-MAX_HANDS = 6
-CAMERA_WIDTH = 640
-CAMERA_HEIGHT = 480
-TARGET_FPS = 60
-BUBBLE_SPAWN_INTERVAL = 0.75
-MAX_BUBBLES = 16
-FINGERTIPS = [4, 8, 12, 16, 20]
 
-BUBBLE_COLORS = [
-    (75, 190, 255),
-    (255, 105, 170),
-    (120, 225, 155),
-    (255, 190, 75),
-    (185, 135, 255),
-    (80, 225, 220),
+TARGET_GAME_FPS = 60
+BALLOON_SPAWN_INTERVAL = 0.95
+MAX_BALLOONS = 12
+
+BALLOON_COLORS = [
+    (245, 75, 100),
+    (75, 165, 245),
+    (180, 85, 225),
+    (245, 155, 55),
+    (65, 190, 145),
+    (245, 105, 175),
+    (80, 190, 220),
 ]
 
 
-class Bubble:
-    """A bubble that falls from the top of the screen."""
+def blend_color(a, b, amount: float):
+    return tuple(
+        max(0, min(255, int(a[i] + (b[i] - a[i]) * amount)))
+        for i in range(3)
+    )
 
-    def __init__(self, screen_width: int, screen_height: int, initial: bool = False):
-        self.radius = random.randint(27, 48)
-        self.x = random.randint(self.radius, max(self.radius, screen_width - self.radius))
+
+def make_balloon_sprite(radius: int, base_color: tuple[int, int, int]):
+    """Pre-render a glossy balloon; no gradient work is done per game frame."""
+    body_width = int(radius * 1.48)
+    body_height = int(radius * 1.88)
+    padding = 12
+    sprite = pygame.Surface(
+        (body_width + padding * 2, body_height + padding * 2 + 12),
+        pygame.SRCALPHA,
+    )
+    body_rect = pygame.Rect(padding, padding, body_width, body_height)
+    dark = tuple(int(channel * 0.48) for channel in base_color)
+    light = tuple(min(255, int(channel * 1.25 + 42)) for channel in base_color)
+
+    pygame.draw.ellipse(sprite, (*dark, 255), body_rect)
+    for step in range(30):
+        t = step / 29.0
+        inset_x = int((1.0 - t) * body_width * 0.13)
+        inset_y = int((1.0 - t) * body_height * 0.09)
+        rect = body_rect.inflate(-2 * inset_x, -2 * inset_y)
+        rect.x += int(body_width * 0.025)
+        rect.y -= int(body_height * 0.015)
+        color = blend_color(base_color, light, t * 0.72)
+        pygame.draw.ellipse(sprite, (*color, 255), rect)
+
+    lower_shade = pygame.Surface(
+        (body_width, int(body_height * 0.55)), pygame.SRCALPHA
+    )
+    pygame.draw.ellipse(
+        lower_shade,
+        (*dark, 55),
+        pygame.Rect(0, 0, body_width, int(body_height * 0.90)),
+    )
+    sprite.blit(lower_shade, (padding, padding + int(body_height * 0.48)))
+
+    pygame.draw.ellipse(
+        sprite,
+        (255, 255, 255, 165),
+        pygame.Rect(
+            padding + int(body_width * 0.17),
+            padding + int(body_height * 0.13),
+            max(5, int(body_width * 0.18)),
+            max(10, int(body_height * 0.31)),
+        ),
+    )
+    pygame.draw.ellipse(
+        sprite,
+        (255, 255, 255, 100),
+        pygame.Rect(
+            padding + int(body_width * 0.38),
+            padding + int(body_height * 0.10),
+            max(4, int(body_width * 0.10)),
+            max(5, int(body_height * 0.08)),
+        ),
+    )
+    pygame.draw.ellipse(sprite, (*dark, 220), body_rect, width=2)
+
+    neck_top = padding + body_height - 1
+    center_x = padding + body_width // 2
+    pygame.draw.polygon(
+        sprite,
+        (*base_color, 255),
+        [
+            (center_x - 6, neck_top - 1),
+            (center_x + 6, neck_top - 1),
+            (center_x + 4, neck_top + 8),
+            (center_x - 4, neck_top + 8),
+        ],
+    )
+    pygame.draw.polygon(
+        sprite,
+        (*dark, 255),
+        [
+            (center_x - 5, neck_top + 6),
+            (center_x + 5, neck_top + 6),
+            (center_x, neck_top + 14),
+        ],
+    )
+    return sprite, body_width, body_height, center_x, neck_top + 12
+
+
+class Balloon:
+    def __init__(self, screen_width: int, screen_height: int, initial=False):
+        self.radius = random.randint(32, 48)
+        self.color = random.choice(BALLOON_COLORS)
+        (
+            self.sprite,
+            self.body_width,
+            self.body_height,
+            self.string_x,
+            self.string_start_y,
+        ) = make_balloon_sprite(self.radius, self.color)
+        margin = self.body_width // 2 + 8
+        self.x = random.randint(margin, max(margin, screen_width - margin))
         self.y = (
-            random.randint(50, max(80, screen_height // 3))
+            random.randint(60, max(100, screen_height // 3))
             if initial
-            else -self.radius
+            else -self.body_height
         )
-        self.speed = random.uniform(115.0, 205.0)
-        self.drift = random.uniform(-24.0, 24.0)
-        self.color = random.choice(BUBBLE_COLORS)
+        self.speed = random.uniform(95.0, 165.0)
+        self.drift = random.uniform(-22.0, 22.0)
+        self.string_length = random.randint(34, 58)
+        self.phase = random.uniform(0.0, math.tau)
 
-    def update(self, dt: float, screen_width: int) -> None:
+    def update(self, dt: float, screen_width: int):
         self.y += self.speed * dt
         self.x += self.drift * dt
-
-        if self.x < self.radius:
-            self.x = self.radius
+        self.phase += dt * 2.0
+        half_width = self.body_width / 2
+        if self.x < half_width:
+            self.x = half_width
             self.drift = abs(self.drift)
-        elif self.x > screen_width - self.radius:
-            self.x = screen_width - self.radius
+        elif self.x > screen_width - half_width:
+            self.x = screen_width - half_width
             self.drift = -abs(self.drift)
 
-    def draw(self, surface: pygame.Surface) -> None:
-        center = (int(self.x), int(self.y))
-        pygame.draw.circle(surface, (*self.color, 105), center, self.radius)
-        pygame.draw.circle(surface, (*self.color, 245), center, self.radius, 3)
+    def contains(self, point_x: float, point_y: float) -> bool:
+        # Only the inflated body is a hit target; knot and string are excluded.
+        dx = (point_x - self.x) / max(self.body_width * 0.50, 1.0)
+        dy = (point_y - self.y) / max(self.body_height * 0.50, 1.0)
+        return dx * dx + dy * dy <= 1.0
 
-        # Small white shine makes the bubble look glossy.
-        shine_center = (
-            int(self.x - self.radius * 0.32),
-            int(self.y - self.radius * 0.32),
-        )
-        pygame.draw.circle(
-            surface,
-            (255, 255, 255, 225),
-            shine_center,
-            max(3, self.radius // 7),
-        )
-        pygame.draw.arc(
-            surface,
-            (255, 255, 255, 150),
-            pygame.Rect(
-                int(self.x - self.radius * 0.65),
-                int(self.y - self.radius * 0.65),
-                int(self.radius * 1.3),
-                int(self.radius * 1.3),
-            ),
-            math.radians(205),
-            math.radians(315),
-            2,
-        )
+    def draw(self, surface: pygame.Surface):
+        left = int(self.x - self.sprite.get_width() / 2)
+        top = int(self.y - self.body_height / 2 - 12)
+        start_x = self.x
+        start_y = top + self.string_start_y
+        string_points = []
+        for index in range(9):
+            t = index / 8.0
+            sway = math.sin(self.phase + t * 3.2) * (4.0 + 5.0 * t)
+            string_points.append(
+                (int(start_x + sway), int(start_y + t * self.string_length))
+            )
+        pygame.draw.lines(surface, (235, 235, 245), False, string_points, 2)
+        pygame.draw.lines(surface, (90, 100, 120), False, string_points, 1)
+        surface.blit(self.sprite, (left, top))
 
 
 class PopParticle:
-    """A small particle used for the bubble-pop effect."""
-
     def __init__(self, x: float, y: float, color: tuple[int, int, int]):
         angle = random.uniform(0.0, math.tau)
-        speed = random.uniform(55.0, 175.0)
+        speed = random.uniform(65.0, 190.0)
         self.x = x
         self.y = y
         self.vx = math.cos(angle) * speed
         self.vy = math.sin(angle) * speed
         self.color = color
-        self.life = 0.48
+        self.life = random.uniform(0.28, 0.48)
         self.max_life = self.life
+        self.radius = random.randint(2, 5)
 
-    def update(self, dt: float) -> None:
+    def update(self, dt: float):
         self.x += self.vx * dt
         self.y += self.vy * dt
-        self.vy += 90.0 * dt
+        self.vy += 100.0 * dt
         self.life -= dt
 
-    def draw(self, surface: pygame.Surface) -> None:
+    def draw(self, surface: pygame.Surface):
         ratio = max(0.0, self.life / self.max_life)
-        alpha = int(255 * ratio)
-        radius = max(1, int(5 * ratio))
         pygame.draw.circle(
             surface,
-            (*self.color, alpha),
+            self.color,
             (int(self.x), int(self.y)),
-            radius,
+            max(1, int(self.radius * ratio)),
         )
 
 
-def prepare_fullscreen_camera_frame(frame, screen_size):
-    """Scale camera frame to fill the display and return crop offsets."""
+def build_fullscreen_camera(frame, screen_size):
+    """Resize/crop only when a fresh camera frame arrives."""
     screen_width, screen_height = screen_size
     frame_height, frame_width = frame.shape[:2]
-
-    # Fill the whole screen while preserving the camera image proportions.
     scale = max(screen_width / frame_width, screen_height / frame_height)
-    scaled_width = math.ceil(frame_width * scale)
-    scaled_height = math.ceil(frame_height * scale)
+    scaled_width = max(screen_width, int(frame_width * scale))
+    scaled_height = max(screen_height, int(frame_height * scale))
+    crop_x = (scaled_width - screen_width) // 2
+    crop_y = (scaled_height - screen_height) // 2
 
-    resized = cv2.resize(
-        frame,
-        (scaled_width, scaled_height),
-        interpolation=cv2.INTER_LINEAR,
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    camera_surface = pygame.image.frombuffer(
+        rgb.tobytes(), (frame_width, frame_height), "RGB"
     )
-
-    crop_x = max(0, (scaled_width - screen_width) // 2)
-    crop_y = max(0, (scaled_height - screen_height) // 2)
-    cropped = resized[
-        crop_y : crop_y + screen_height,
-        crop_x : crop_x + screen_width,
-    ]
-
-    return cropped, scaled_width, scaled_height, crop_x, crop_y
+    scaled_surface = pygame.transform.scale(
+        camera_surface, (scaled_width, scaled_height)
+    )
+    background = scaled_surface.subsurface(
+        pygame.Rect(crop_x, crop_y, screen_width, screen_height)
+    ).copy()
+    return background, (scaled_width, scaled_height, crop_x, crop_y)
 
 
-def create_pop_particles(particles, x, y, color):
-    for _ in range(14):
-        particles.append(PopParticle(x, y, color))
+def normalized_to_screen(point, transform, screen_size):
+    scaled_width, scaled_height, crop_x, crop_y = transform
+    screen_width, screen_height = screen_size
+    x = int(point[0] * scaled_width - crop_x)
+    y = int(point[1] * scaled_height - crop_y)
+    if 0 <= x < screen_width and 0 <= y < screen_height:
+        return x, y
+    return None
 
 
 def main() -> None:
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError(
-            f"MediaPipe modeli topilmadi: {MODEL_PATH}\n"
-            "Modelni models/hand_landmarker.task manziliga joylashtiring."
-        )
-
     pygame.init()
     pygame.display.set_caption("AI Bubble Pop Game")
-
-    # Open the game directly in fullscreen mode.
     screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
     screen_width, screen_height = screen.get_size()
-
     clock = pygame.time.Clock()
+
     score_font = pygame.font.SysFont("arial", 38, bold=True)
     info_font = pygame.font.SysFont("arial", 23, bold=True)
     help_font = pygame.font.SysFont("arial", 22)
 
-    camera = cv2.VideoCapture(0)
-    camera.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-
-    if not camera.isOpened():
-        camera.release()
+    tracker_worker = HandTrackingWorker()
+    try:
+        tracker_worker.start()
+    except Exception:
+        tracker_worker.stop()
         pygame.quit()
-        raise RuntimeError("Webkamera ochilmadi. Kamerani tekshiring.")
+        raise
 
-    BaseOptions = mp.tasks.BaseOptions
-    HandLandmarker = mp.tasks.vision.HandLandmarker
-    HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
-    RunningMode = mp.tasks.vision.RunningMode
-
-    options = HandLandmarkerOptions(
-        base_options=BaseOptions(model_asset_path=str(MODEL_PATH)),
-        running_mode=RunningMode.VIDEO,
-        num_hands=MAX_HANDS,
-        min_hand_detection_confidence=0.5,
-        min_hand_presence_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
-
-    bubbles = [Bubble(screen_width, screen_height, initial=True) for _ in range(4)]
-    particles = []
+    balloons = [
+        Balloon(screen_width, screen_height, initial=True) for _ in range(5)
+    ]
+    particles: list[PopParticle] = []
+    pinch_tracker = PinchTracker()
     score = 0
     spawn_timer = 0.0
-    last_timestamp_ms = -1
-    start_time = time.perf_counter()
+    last_frame_id = -1
+    camera_background = None
+    camera_transform = None
+    latest_hands: list[list[tuple[float, float]]] = []
+    ai_fps = 0.0
     running = True
 
-    # Reusable transparent layers.
-    effects_layer = pygame.Surface((screen_width, screen_height), pygame.SRCALPHA)
     shade_layer = pygame.Surface((screen_width, screen_height), pygame.SRCALPHA)
-    shade_layer.fill((0, 0, 0, 48))
-    hud_layer = pygame.Surface((390, 112), pygame.SRCALPHA)
+    shade_layer.fill((0, 0, 0, 42))
+    hud_width = min(500, screen_width - 40)
+    hud_layer = pygame.Surface((hud_width, 118), pygame.SRCALPHA)
     pygame.draw.rect(
         hud_layer,
-        (12, 20, 38, 185),
+        (10, 18, 34, 190),
         hud_layer.get_rect(),
         border_radius=20,
     )
 
     try:
-        with HandLandmarker.create_from_options(options) as landmarker:
-            while running:
-                dt = min(clock.tick(TARGET_FPS) / 1000.0, 0.05)
-
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
+        while running:
+            dt = min(clock.tick(TARGET_GAME_FPS) / 1000.0, 0.05)
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_ESCAPE, pygame.K_q):
                         running = False
-                    elif event.type == pygame.KEYDOWN:
-                        if event.key in (pygame.K_ESCAPE, pygame.K_q):
-                            running = False
+            if not running:
+                break
 
-                if not running:
-                    break
+            (
+                frame,
+                hands,
+                frame_id,
+                current_ai_fps,
+                worker_error,
+            ) = tracker_worker.snapshot(last_frame_id)
+            ai_fps = current_ai_fps
+            latest_hands = hands
+            if worker_error:
+                raise RuntimeError(worker_error)
 
-                success, frame = camera.read()
-                if not success:
-                    print("Kameradan tasvir olinmadi.")
-                    break
+            if frame is not None and frame_id != last_frame_id:
+                camera_background, camera_transform = build_fullscreen_camera(
+                    frame, (screen_width, screen_height)
+                )
+                last_frame_id = frame_id
 
-                # Mirror the camera so movement feels natural to players.
-                frame = cv2.flip(frame, 1)
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                mp_image = mp.Image(
-                    image_format=mp.ImageFormat.SRGB,
-                    data=rgb_frame,
+            if camera_background is not None:
+                screen.blit(camera_background, (0, 0))
+            else:
+                screen.fill((18, 25, 45))
+            screen.blit(shade_layer, (0, 0))
+
+            pinch_events_norm, active_pinches_norm = pinch_tracker.update(
+                latest_hands
+            )
+            pinch_events = []
+            active_pinches = []
+            if camera_transform is not None:
+                for point in pinch_events_norm:
+                    mapped = normalized_to_screen(
+                        point, camera_transform, (screen_width, screen_height)
+                    )
+                    if mapped is not None:
+                        pinch_events.append(mapped)
+                for point in active_pinches_norm:
+                    mapped = normalized_to_screen(
+                        point, camera_transform, (screen_width, screen_height)
+                    )
+                    if mapped is not None:
+                        active_pinches.append(mapped)
+
+            spawn_timer += dt
+            while spawn_timer >= BALLOON_SPAWN_INTERVAL:
+                spawn_timer -= BALLOON_SPAWN_INTERVAL
+                if len(balloons) < MAX_BALLOONS:
+                    balloons.append(Balloon(screen_width, screen_height))
+
+            for balloon in balloons:
+                balloon.update(dt, screen_width)
+
+            remaining_balloons = []
+            for balloon in balloons:
+                hit_point = None
+                for pinch_x, pinch_y in pinch_events:
+                    if balloon.contains(pinch_x, pinch_y):
+                        hit_point = (pinch_x, pinch_y)
+                        break
+                if hit_point is not None:
+                    score += 10
+                    particles.extend(
+                        PopParticle(hit_point[0], hit_point[1], balloon.color)
+                        for _ in range(15)
+                    )
+                elif balloon.y - balloon.body_height / 2 < screen_height:
+                    remaining_balloons.append(balloon)
+            balloons = remaining_balloons
+
+            for balloon in balloons:
+                balloon.draw(screen)
+            alive_particles = []
+            for particle in particles:
+                particle.update(dt)
+                if particle.life > 0:
+                    particle.draw(screen)
+                    alive_particles.append(particle)
+            particles = alive_particles
+
+            # Visual cursor: the midpoint between thumb and index finger.
+            for pinch_x, pinch_y in active_pinches:
+                pygame.draw.circle(
+                    screen, (255, 255, 255), (pinch_x, pinch_y), 17, 3
+                )
+                pygame.draw.circle(
+                    screen, (255, 220, 80), (pinch_x, pinch_y), 6
                 )
 
-                # MediaPipe VIDEO mode requires strictly increasing timestamps.
-                timestamp_ms = max(
-                    last_timestamp_ms + 1,
-                    int((time.perf_counter() - start_time) * 1000),
-                )
-                last_timestamp_ms = timestamp_ms
-                result = landmarker.detect_for_video(mp_image, timestamp_ms)
+            screen.blit(hud_layer, (22, 22))
+            score_surface = score_font.render(
+                f"BALL: {score}", True, (255, 255, 255)
+            )
+            status_surface = info_font.render(
+                f"QO'LLAR: {len(latest_hands)}/{MAX_HANDS}   "
+                f"O'YIN FPS: {clock.get_fps():.0f}   AI FPS: {ai_fps:.0f}",
+                True,
+                (195, 235, 255),
+            )
+            screen.blit(score_surface, (43, 30))
+            screen.blit(status_surface, (46, 82))
 
-                # Prepare a full-screen camera background and matching coordinates.
-                camera_frame, scaled_w, scaled_h, crop_x, crop_y = (
-                    prepare_fullscreen_camera_frame(frame, (screen_width, screen_height))
-                )
-                camera_rgb = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
-                camera_surface = pygame.image.frombuffer(
-                    camera_rgb.tobytes(),
-                    (screen_width, screen_height),
-                    "RGB",
-                ).copy()
-                screen.blit(camera_surface, (0, 0))
-                screen.blit(shade_layer, (0, 0))
-
-                # Convert all fingertips from normalized camera coordinates
-                # into the same cropped fullscreen coordinate system.
-                fingertip_points = []
-                detected_hands = result.hand_landmarks
-
-                for hand_landmarks in detected_hands:
-                    for landmark_index in FINGERTIPS:
-                        landmark = hand_landmarks[landmark_index]
-                        point_x = int(landmark.x * scaled_w - crop_x)
-                        point_y = int(landmark.y * scaled_h - crop_y)
-
-                        if 0 <= point_x < screen_width and 0 <= point_y < screen_height:
-                            fingertip_points.append((point_x, point_y))
-
-                # Spawn bubbles continuously.
-                spawn_timer += dt
-                while spawn_timer >= BUBBLE_SPAWN_INTERVAL:
-                    spawn_timer -= BUBBLE_SPAWN_INTERVAL
-                    if len(bubbles) < MAX_BUBBLES:
-                        bubbles.append(Bubble(screen_width, screen_height))
-
-                # Move bubbles and check collisions against every detected fingertip.
-                remaining_bubbles = []
-                for bubble in bubbles:
-                    bubble.update(dt, screen_width)
-                    popped = False
-                    hit_position = (bubble.x, bubble.y)
-                    hit_distance = (bubble.radius + 10) ** 2
-
-                    for finger_x, finger_y in fingertip_points:
-                        distance_squared = (
-                            (finger_x - bubble.x) ** 2
-                            + (finger_y - bubble.y) ** 2
-                        )
-                        if distance_squared <= hit_distance:
-                            popped = True
-                            hit_position = (finger_x, finger_y)
-                            break
-
-                    if popped:
-                        score += 10
-                        create_pop_particles(
-                            particles,
-                            hit_position[0],
-                            hit_position[1],
-                            bubble.color,
-                        )
-                    elif bubble.y - bubble.radius <= screen_height:
-                        remaining_bubbles.append(bubble)
-
-                bubbles = remaining_bubbles
-
-                # Draw bubbles and pop particles on a transparent layer.
-                effects_layer.fill((0, 0, 0, 0))
-                for bubble in bubbles:
-                    bubble.draw(effects_layer)
-
-                active_particles = []
-                for particle in particles:
-                    particle.update(dt)
-                    if particle.life > 0:
-                        particle.draw(effects_layer)
-                        active_particles.append(particle)
-                particles = active_particles
-                screen.blit(effects_layer, (0, 0))
-
-                # Draw fingertip markers above the bubbles.
-                for finger_x, finger_y in fingertip_points:
-                    pygame.draw.circle(screen, (255, 255, 255), (finger_x, finger_y), 12, 2)
-                    pygame.draw.circle(screen, (70, 225, 255), (finger_x, finger_y), 5)
-
-                # Score and status panel.
-                screen.blit(hud_layer, (22, 22))
-                score_surface = score_font.render(f"BALL: {score}", True, (255, 255, 255))
-                status_surface = info_font.render(
-                    f"QO'LLAR: {len(detected_hands)}   FPS: {clock.get_fps():.0f}",
-                    True,
-                    (190, 235, 255),
-                )
-                screen.blit(score_surface, (43, 30))
-                screen.blit(status_surface, (46, 77))
-
-                help_surface = help_font.render(
-                    "Barmoqlaringiz bilan pufaklarni yoriting  |  ESC - chiqish",
-                    True,
-                    (255, 255, 255),
-                )
-                help_rect = help_surface.get_rect(
-                    center=(screen_width // 2, screen_height - 36)
-                )
-                screen.blit(help_surface, help_rect)
-
-                pygame.display.flip()
+            help_surface = help_font.render(
+                "Bosh va kursatkich barmog'ingizni qisib sharni yoriting  |  ESC - chiqish",
+                True,
+                (255, 255, 255),
+            )
+            help_rect = help_surface.get_rect(
+                center=(screen_width // 2, screen_height - 36)
+            )
+            screen.blit(help_surface, help_rect)
+            pygame.display.flip()
 
     finally:
-        camera.release()
+        tracker_worker.stop()
         pygame.quit()
 
 
